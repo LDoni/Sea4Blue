@@ -83,7 +83,7 @@ for file in *.fastq; do
     fastplong -i "$file" -o "$outfile"
 done
 
- for file in *.fastq; do emu abundance $file --output-dir /media/shared1/atlantic_sea4blue/EMU_short_long --db /media/shared1/EMU_DB  --threads 10 ; done
+ for file in *.fastq; do emu abundance $file --output-dir /media/shared1/atlantic_sea4blue/EMU_short_long/fastp_denoised --db /media/shared1/EMU_DB  --threads 10 ; done
 ```
 # long reads genomiphy 
 #/media/shared1/atlantic_sea4blue/genomiphy_targeted/nuovo_basecalling/home/nanopore/Documents/lapo_19_dec_2022_16s_groel/no_sample/20221219_1656_MC-113519_FAS65719_e1c30dd4/basecalled/pass/ALL/16S/rawreads
@@ -103,7 +103,7 @@ for file in *.fastq.gz; do
     
     fastplong -i "$file" -o "$outfile" --thread 10
 done
- for file in *.fastq.gz; do emu abundance $file --output-dir /media/shared1/atlantic_sea4blue/EMU_short_long --db /media/shared1/EMU_DB  --threads 10 ; done
+ for file in *.fastq.gz; do emu abundance $file --output-dir /media/shared1/atlantic_sea4blue/EMU_short_long/fastp_denoised --db /media/shared1/EMU_DB  --threads 10 ; done
 ```
 
 emu combine-outputs results species
