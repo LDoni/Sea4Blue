@@ -1,1 +1,116 @@
+library(tidyverse)
+library(reticulate)
 
+reticulate::virtualenv_list()
+#virtualenv_remove("something", confirm = FALSE)  # confirm = FALSE evita la richiesta di conferma
+install_python() 
+
+virtualenv_create(envname = "something")
+virtualenv_install("something", packages = c("copernicusmarine"))
+use_virtualenv("something", required = TRUE)
+ 
+py_install("copernicusmarine")
+
+cm <- import("copernicusmarine")
+ 
+ cm$CopernicusMarineDataset
+
+
+library(dplyr)
+library(reticulate)
+library(ncdf4)
+library(purrr)
+
+
+
+# Dataset da usare (physics vs bgc separati)
+datasets <- list(
+  physics = list(
+    id = "cmems_mod_glo_phy_myint_0.083deg_P1D-m",
+    vars = c("thetao", "so", "uo", "vo", "zos"),
+    depth = 0.49402499198913574  # primo livello fisico
+  ),
+  bgc_model = list(
+    id = "cmems_mod_glo_bgc_my_0.25deg_P1D-m",
+    vars = c("chl", "o2", "no3", "po4", "si"),
+    depth = 0.5057600140571594  # primo livello biogeochimico
+  )
+)
+
+# Funzione per leggere valori dal netCDF
+extract_nc_values <- function(ncfile, vars) {
+  nc <- nc_open(ncfile)
+  out <- list()
+  for (v in vars) {
+    if (v %in% names(nc$var)) {
+      val <- ncvar_get(nc, v)
+      out[[v]] <- as.numeric(val) # un solo valore
+    } else {
+      out[[v]] <- NA
+    }
+  }
+  nc_close(nc)
+  return(out)
+}
+
+# Funzione principale per un singolo dataset
+get_sample_data_single <- function(sample, ds, ds_name) {
+  result <- list()
+  tmpfile <- tempfile(fileext = ".nc")
+  
+  tryCatch({
+    message("Scarico ", ds_name, " per ", sample[["Nominativo.campione."]])
+    
+    cm$subset(
+      dataset_id = ds$id,
+      variables = ds$vars,
+      minimum_longitude = as.numeric(sample[["Longitude"]]),
+      maximum_longitude = as.numeric(sample[["Longitude"]]),
+      minimum_latitude = as.numeric(sample[["Latitude"]]),
+      maximum_latitude = as.numeric(sample[["Latitude"]]),
+      start_datetime = format(as.Date(sample[["data"]]), "%Y-%m-%d"),
+      end_datetime = format(as.Date(sample[["data"]]), "%Y-%m-%d"),
+      minimum_depth = ds$depth,
+      maximum_depth = ds$depth,
+      coordinates_selection_method = "nearest",
+      output_filename = tmpfile
+    
+    )
+    
+    if (file.exists(tmpfile) && file.size(tmpfile) > 0) {
+      vals <- extract_nc_values(tmpfile, ds$vars)
+      result <- vals
+    } else {
+      warning("File non scaricato per ", sample[["Nominativo.campione."]], " - ", ds_name)
+      result <- setNames(as.list(rep(NA, length(ds$vars))), ds$vars)
+    }
+    
+  }, error = function(e) {
+    message("Errore per ", sample[["Nominativo.campione."]], " - ", ds_name, ": ", e$message)
+    result <- setNames(as.list(rep(NA, length(ds$vars))), ds$vars)
+  })
+  
+  if (file.exists(tmpfile)) file.remove(tmpfile)
+  
+  return(result)
+}
+
+# Funzione generale: fa physics + bgc
+get_sample_data <- function(sample, datasets) {
+  result <- as.list(sample)
+  for (ds_name in names(datasets)) {
+    ds <- datasets[[ds_name]]
+    vals <- get_sample_data_single(sample, ds, ds_name)
+    result <- c(result, vals)
+  }
+  return(as.data.frame(result))
+}
+
+# Esecuzione
+all_data <- map_dfr(1:nrow(df), function(i) {
+  sample <- df[i, ]
+  get_sample_data(sample, datasets)
+})
+
+# Risultato
+print(head(all_data))
