@@ -1,0 +1,757 @@
+---
+title: "Atlantic 16S Analysis – Sea4Blue Transect"
+author: "Your Name"
+format: html
+editor: visual
+---
+
+# Introduction
+
+This report presents the spatial and environmental characterization of the Atlantic Sea4Blue 16S dataset.\
+Sampling stations are mapped across Longhurst biogeographical provinces and overlaid with annual Sea Surface Temperature (SST) derived from MODIS satellite data.
+
+------------------------------------------------------------------------
+# Load Required Libraries
+
+
+```{r}
+#| message: false
+#| warning: false
+library(ggforce)
+library(Matrix)
+library(foreach)
+library(pander)
+library(doParallel)
+library(ape)
+library(ggpubr)
+library(ggrepel)
+library(ggplot2)
+library(sf)
+library(rnaturalearth)
+library(raster)
+library(ncdf4)
+library(geosphere)
+library(tibble)
+library(oceanmap)
+library(RColorBrewer)
+library(viridis)
+library(scales)
+library(dplyr)
+library(umap)
+library(phyloseq)
+library(microbiome)
+library(MiscMetabar)
+library(tidyverse)
+library(vegan)
+library(picante)
+library(Biostrings)
+library(ape)
+```
+
+Load Phyloseq Object
+
+```{r}
+path <- "/media/shared1/atlantic_sea4blue/16S_Illumina/Lapo_18May/"
+
+ps <- readRDS(paste0(path, "ps.rds"))
+
+# Inspect OTU table
+head(t(otu_table(ps)))
+```
+
+# Plot Sea4Blue transect
+
+Extract Sample Coordinates
+
+```{r}
+coord.df <- ps %>%
+  subset_samples(!(sample.description %in% c("Laposnegative", 
+                                            "Lapospositive"))) %>%
+  meta() %>%
+  dplyr::select(sample.description, Latitude, Longitude)
+
+colnames(coord.df) <- c("id", "lat", "lon")
+
+head(coord.df)
+
+points_sf <- st_as_sf(coord.df,
+                      coords = c("lon", "lat"),
+                      crs = 4326)
+```
+
+Load Longhurst Provinces
+
+```{r}
+longhurst <- st_read(paste0(path, "longhurst_v4_2010/Longhurst_world_v4_2010.shp"),
+                     quiet = TRUE)
+
+longhurst <- st_make_valid(longhurst)
+longhurst <- st_transform(longhurst, 4326)
+
+result <- st_join(points_sf,
+                  longhurst["ProvCode"],
+                  join = st_intersects)
+
+head(as.data.frame(result))
+
+```
+
+Plot Longhurst Provinces and Sampling Stations
+
+```{r}
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+province_used <- unique(result$ProvCode)
+
+longhurst_subset <- longhurst %>%
+  filter(ProvCode %in% province_used)
+
+ggplot() +
+  geom_sf(data = world, fill = "#D9D9D9",
+          color = "gray70", size = 0.3) +
+  geom_sf(data = longhurst_subset,
+          aes(fill = ProvCode),
+          color = NA, alpha = 0.4) +
+  geom_sf(data = result,
+          color = "black", size = 2) +
+  geom_sf_text(data = result,
+               aes(label = id),
+               size = 3, nudge_y = 1,
+               check_overlap = TRUE) +
+  scale_fill_viridis_d(name = "Longhurst Province") +
+  coord_sf(crs = 4326,
+           xlim = c(-90, 10),
+           ylim = c(25, 45)) +
+  theme_minimal() +
+  labs(title = "Longhurst Provinces and Sample Points",
+       x = "Longitude",
+       y = "Latitude")
+```
+
+```{r}
+sample_data(ps)$longhurst_provinces <-
+  result$ProvCode[
+    match(sample_data(ps)$sample.description,
+          result$id)
+  ]
+```
+
+Download Annual Sea Surface Temperature (MODIS) externally using terminal:
+
+```         
+wget --auth-no-challenge --load-cookies ~/.urs_cookies \
+--save-cookies ~/.urs_cookies \
+"https://oceandata.sci.gsfc.nasa.gov/ob/getfile/AQUA_MODIS.20220101_20221231.L3m.YR.SST.sst.4km.nc"
+```
+
+------------------------------------------------------------------------
+
+```{r}
+
+crop.vals_Atl <- c(lat = c(-90,10), 
+                   lon = c(25, 45))
+
+SST_Atl <- ncdf4::nc_open(paste0(path,"AQUA_MODIS.20220101_20221231.L3m.YR.SST.sst.4km.nc")) %>%
+  oceanmap::nc2raster(., "sst") %>%
+  raster::flip(., "y") %>%
+  raster::crop(., raster::extent(crop.vals_Atl))
+
+SST_df <- as.data.frame(SST_Atl, xy = TRUE)
+names(SST_df)[3] <- "sst" 
+points_sf$longhurst_provinces <- as.data.frame(result)$ProvCode
+```
+
+#Combined Map: SST + Longhurst Provinces
+
+```{r}
+ggplot() +
+  geom_raster(data = SST_df,
+              aes(x = x, y = y, fill = sst)) +
+  scale_fill_gradientn(
+    colors = rev(brewer.pal(11, "RdBu")),
+    name = "Annual SST (°C)",
+    limits = c(0, 35),
+    na.value = "transparent"
+  ) +
+  geom_sf(data = world,
+          fill = "#D9D9D9",
+          color = "gray70",
+          size = 0.3) +
+  geom_sf(data = longhurst_subset,
+          color = "gray60",
+          fill = NA,
+          size = 0.4) +
+  geom_sf(data = points_sf,
+          aes(color = longhurst_provinces),
+          size = 3) +
+  scale_color_viridis_d(name = "Longhurst Province") +
+  geom_sf_text(data = points_sf,
+               aes(label = id),
+               size = 3,
+               nudge_y = 1,
+               check_overlap = TRUE) +
+  coord_sf(crs = 4326,
+           xlim = c(-90, 10),
+           ylim = c(25, 45),
+           expand = FALSE) +
+  theme_minimal() +
+  labs(title = "Sea Surface Temperature and Sample Points",
+       subtitle = "MODIS Annual SST + Longhurst Provinces",
+       x = "Longitude",
+       y = "Latitude")
+```
+# importo i dati scaricati in reticulate_var_amb_giuste.R
+```{r}
+rm(list = ls())
+
+path <- "/media/shared1/atlantic_sea4blue/16S_Illumina/Lapo_18May/"
+
+all_data<-read.csv(paste0(path,"dati_scaricati_copernicus.csv"))
+ps <- readRDS(paste0(path,"ps.rds"))
+otu_table(ps) <- otu_table(t(otu_table(ps)), taxa_are_rows = TRUE)
+head(tax_table(ps))
+phyloseq_obj<-ps
+```
+
+
+pre treatment data
+
+```{r}
+
+#rimuovo i contaminanti
+grep(pattern = "Mitochondria", tax_table(phyloseq_obj)) 
+grep(pattern = "Chloroplast", tax_table(phyloseq_obj)) 
+phyloseq_obj <- phyloseq_obj %>% subset_taxa( Family!= "Mitochondria" | is.na(Family) & Class!="Chloroplast" | is.na(Class) ) 
+phyloseq_obj <- subset_taxa(phyloseq_obj, (tax_table(phyloseq_obj)[,"Order"]!="Chloroplast") | is.na(tax_table(phyloseq_obj)[,"Order"]))
+phyloseq_obj = subset_samples(phyloseq_obj,!( Nominativo.campione.=="Positive" | Nominativo.campione.=="Negative"))
+sample_names(phyloseq_obj)<-sample_data(phyloseq_obj)$Nominativo.campione.
+
+merged_metadata <- merge(sample_data(phyloseq_obj)%>% meta(), all_data, 
+                         by = "Nominativo.campione.", 
+                         all.x = TRUE)
+rownames(merged_metadata) <- merged_metadata$Nominativo.campione.
+sample_data(phyloseq_obj) <- merged_metadata
+sample_data(phyloseq_obj)
+phyloseq_obj<-clean_pq(phyloseq_obj)
+```
+
+# do folders and save into requiered files for subsequent analysis
+
+```{r}
+#dir.create("Data", recursive = TRUE)
+#dir.create("Data/Meta_Data/Prok", recursive = TRUE)
+#dir.create("Data/Count_Data/Processed/Prok", recursive = TRUE)
+#dir.create("Data/Count_Data/Fasta/Prok", recursive = TRUE)
+#dir.create("Data/Trees/Prok", recursive = TRUE)
+#dir.create("Data/Processed/Prok", recursive = TRUE)
+#dir.create("Data/Taxonomy", recursive = TRUE)
+
+#metadata
+#sample_data(phyloseq_obj) %>%
+#   as_tibble() %>%
+#  rename(Sample_ID = Nominativo.campione.) %>%
+#  mutate(Sample_ID = as.character(Sample_ID)) %>%
+#  relocate(Sample_ID, .before = 1)%>%
+#  write_tsv("Data/Meta_Data/Prok/Meta_Data.tsv")
+#asv table
+#otu<-otu_table(phyloseq_obj) %>%
+#  as.data.frame() %>%
+#  rownames_to_column("OTU_ID") 
+#  write_tsv(otu,"Data/Count_Data/Processed/Prok/Full_Prok_Count.tsv")  
+#  write_tsv(otu,"Data/Processed/Prok/Full_Prok_Count.tsv")
+
+#   Sequenze FASTA
+#writeXStringSet(refseq(phyloseq_obj), "Data/Count_Data/Fasta/Prok/Full_Prok_Sequences.fasta")
+
+# 4.4 Albero filogenetico
+#write.tree(phy_tree(phyloseq_obj), "Data/Trees/Prok/Prok_Combined.tree")
+
+# 4.5 Tassonomia
+#tax_table(phyloseq_obj) %>%
+#  as.data.frame() %>%
+#  rownames_to_column("OTU_ID") %>%
+#  write_tsv("Data/Taxonomy/Prok_Taxonomy.tsv")
+
+
+```
+
+
+Normalization
+```{r}
+doubleton <- genefilter_sample(phyloseq_obj, filterfun_sample(function(x) x > 1), A=1)
+doubleton <- prune_taxa(doubleton, phyloseq_obj) 
+
+# transforming 
+data.metagenomeSeq = phyloseq_to_metagenomeSeq(doubleton)
+
+p = cumNormStat(data.metagenomeSeq) #default is 0.5
+data.cumnorm = cumNorm(data.metagenomeSeq, p=p)
+#data.cumnorm
+data.CSS = MRcounts(data.cumnorm, norm=TRUE, log=TRUE)
+head(data.CSS)
+dim(data.CSS)  # make sure the data are in a correct formal: number of samples in rows
+phyloseq_obj_css <- phyloseq_obj
+otu_table(phyloseq_obj_css) <- otu_table(data.CSS, taxa_are_rows = T)
+sample_names(phyloseq_obj_css)<-sample_data(phyloseq_obj_css)$Nominativo.campione.
+phyloseq_obj_css
+
+```
+
+# alpha diversity
+
+```{r}
+physeq_pa <- transform_sample_counts(phyloseq_obj_css, function(x) ifelse(x > 0, 1, 0))
+head(otu_table(physeq_pa))
+
+```
+```{r}
+sample_variables(physeq_pa)
+```
+
+
+```{r}
+p1<-plot_richness(physeq_pa,x="Longitude.x",color = "Zona",measures=c("Observed"))
+newSTorder = c( "ANW","ANC","ANE")
+p1$data$Zona<- as.character(p1$data$Zona)
+p1$data$Zona <- factor(p1$data$Zona, levels=newSTorder) 
+ggplot(p1$data,aes(Longitude.x,value))+
+  theme_bw()+theme(plot.title = element_text(hjust = 0.5))+
+  geom_point(aes(colour = Zona))+
+  scale_color_manual(values=c("#000000","#4280fc", "#ffb452","#f7170a"))+
+  geom_ysideboxplot(aes(x=Zona,y=value,colour = Zona), orientation = "x") +
+  theme(        ggside.panel.scale.y = .4)+scale_ysidex_discrete()+
+  geom_smooth(aes(colour = variable ),size=1.5)+ ylab('Richness') 
+```
+
+
+
+```{r}
+
+ggboxplot(p1$data, x = "Zona", y = "value",
+               color = "Zona", palette = "jco",
+               add = "jitter")+ stat_compare_means()   #0.06
+```
+
+# BETA DIVERSITY 
+## braycurties
+```{r}
+otu.ord <- ordinate(physeq = phyloseq_obj_css, "PCoA", distance = "bray")
+
+plot_ordination(phyloseq_obj_css, otu.ord,  color="Zona",axes =c(1,2))+
+  scale_color_manual(values = c("#4280fc", "#ffb452","#f7170a"))+ geom_point(size=3)+ 
+  geom_text_repel(aes(label=Giorno.di.navigazione.),max.overlaps = Inf, show.legend = FALSE)+
+  geom_mark_ellipse(aes(color = Zona), show.legend = FALSE)+ theme_void()+theme_bw() + 
+  geom_xsidedensity(aes(y=stat(density),fill=Zona), alpha = 0.5, show.legend = FALSE) +
+  geom_ysidedensity(aes(x=stat(density),fill=Zona), alpha = 0.5, show.legend = FALSE) +
+ scale_xsidey_continuous(breaks = NULL, labels = "", expand = expansion(c(0,.1))) +
+  scale_ysidex_continuous(breaks = NULL, labels = "", expand = expansion(c(0,.1))) +
+  ggside::theme_ggside_void()  +
+  scale_fill_manual(values = c("#4280fc", "#ffb452","#f7170a"))+ggtitle("bray-Curtis") #+scale_ysidex_discrete()+
+```
+
+
+```{r}
+set.seed(231)
+bray <- phyloseq::distance(phyloseq_obj_css, method = "bray")
+sampledf <- data.frame(sample_data(phyloseq_obj_css))
+head(sampledf)
+```
+
+```{r}
+adonis2(bray ~ Zona+Giorno.di.navigazione.+Latitude.x+Longitude.x+thetao, data = sampledf, by = "margin",permutations = 9999)
+```
+
+## wunifrac
+
+
+```{r}
+otu.ord <- ordinate(physeq = phyloseq_obj_css, "PCoA", distance = "wunifrac")
+
+sample_data(phyloseq_obj_css)$Zona <-
+  factor(sample_data(phyloseq_obj_css)$Zona)
+#plot ordination
+
+plot_ordination(phyloseq_obj_css, otu.ord,  color="Zona",axes =c(1,2))+
+  scale_color_manual(values = c("#4280fc", "#ffb452","#f7170a"))+ geom_point(size=3)+ 
+  geom_text_repel(aes(label=Giorno.di.navigazione.),max.overlaps = Inf, show.legend = FALSE)+
+  geom_mark_ellipse(aes(color = Zona), show.legend = FALSE)+ theme_void()+theme_bw() + 
+  geom_xsidedensity(aes(y=stat(density),fill=Zona), alpha = 0.5, show.legend = FALSE) +
+  geom_ysidedensity(aes(x=stat(density),fill=Zona), alpha = 0.5, show.legend = FALSE) +
+  scale_xsidey_continuous(breaks = NULL, labels = "", expand = expansion(c(0,.1))) +
+  scale_ysidex_continuous(breaks = NULL, labels = "", expand = expansion(c(0,.1))) +
+  ggside::theme_ggside_void()  +
+  scale_fill_manual(values = c("#4280fc", "#ffb452","#f7170a"))+ggtitle("wunifrac")
+```
+
+```{r}
+set.seed(1)
+
+ uniF <- phyloseq::distance(phyloseq_obj_css, method = "wunifrac")
+ sampledf <- data.frame(sample_data(phyloseq_obj_css))
+
+ 
+adonis2(uniF ~ Zona+Giorno.di.navigazione.+thetao +Longitude.x, data = sampledf,by = "margin")
+```
+
+# distance decay
+
+calcolare le matrici di distanza
+```{r}
+sample_data(phyloseq_obj_css)$Zona <-
+  factor(sample_data(phyloseq_obj_css)$Zona)
+
+sample_data(phyloseq_obj_css)$Latitude.y  <- as.numeric(sample_data(phyloseq_obj_css)$Latitude.y)
+sample_data(phyloseq_obj_css)$Longitude.y <- as.numeric(sample_data(phyloseq_obj_css)$Longitude.y)
+sample_data(phyloseq_obj_css)$thetao      <- as.numeric(sample_data(phyloseq_obj_css)$thetao)
+
+bray_dist <- phyloseq::distance(
+  phyloseq_obj_css,
+  method = "bray"
+)
+unifrac_dist <- phyloseq::distance(
+  phyloseq_obj_css,
+  method = "unifrac",
+  weighted = FALSE
+)
+
+coords <- data.frame(
+  lon = sample_data(phyloseq_obj_css)$Longitude.y,
+  lat = sample_data(phyloseq_obj_css)$Latitude.y
+)
+
+geo_dist <- distm(coords, fun = distHaversine) / 1000
+geo_dist <- as.dist(geo_dist)
+
+
+#distanza ambientale T
+temp_dist <- dist(sample_data(phyloseq_obj_css)$thetao)
+
+dd_df <- tibble(
+  geographic_km = as.vector(geo_dist),
+  delta_temp    = as.vector(temp_dist),
+  bray          = as.vector(bray_dist),
+  unifrac       = as.vector(unifrac_dist)
+) %>%
+  tidyr::drop_na()
+
+#similaruty
+dd_df <- dd_df %>%
+  mutate(
+    bray_sim    = 1 - bray,
+    unifrac_sim = 1 - unifrac
+  )
+head(dd_df)
+```
+
+```{r}
+#Bray–Curtis vs distanza geografica
+
+ggplot(dd_df, aes(geographic_km, bray_sim)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  theme_bw() 
+#UniFrac vs distanza geografica
+ggplot(dd_df, aes(geographic_km, unifrac_sim)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  theme_bw()
+#Bray–Curtis vs differenza di temperatura
+ggplot(dd_df, aes(delta_temp, bray_sim)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  theme_bw() 
+#UniFrac vs differenza di temperatura
+ggplot(dd_df, aes(delta_temp, unifrac_sim)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  theme_bw() 
+#km vs temp
+ggplot(dd_df, aes(delta_temp, geographic_km)) +
+  geom_point(alpha = 0.5, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  theme_bw()
+
+```
+
+tutti insieme z scored
+
+```{r}
+dd_long <- dd_df %>%
+  dplyr::select(
+    geographic_km,
+    delta_temp,
+    bray_sim,
+    unifrac_sim
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(bray_sim, unifrac_sim),
+    names_to = "metric",
+    values_to = "similarity"
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(geographic_km, delta_temp),
+    names_to = "distance_type",
+    values_to = "distance"
+  ) %>%
+  dplyr::mutate(
+    relation = paste(metric, distance_type, sep = " vs ")
+  ) %>%
+  dplyr::group_by(relation) %>%
+  dplyr::mutate(
+    distance_z = scale(distance)[,1],
+    similarity_z = scale(similarity)[,1]
+  ) %>%
+  ungroup()
+
+
+
+ggplot(dd_long, aes(distance_z, similarity_z)) +
+  geom_point(alpha = 0.4, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  facet_wrap(~ relation, scales = "free") +
+  labs(
+    x = "Normalized distance (z-score)",
+    y = "Normalized community similarity (z-score)"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+stesso plot
+```{r}
+dd_plot <- dd_df %>%
+  dplyr::select(
+    geographic_km,
+    delta_temp,
+    bray_sim,
+    unifrac_sim
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(bray_sim, unifrac_sim),
+    names_to = "metric",
+    values_to = "similarity"
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(geographic_km, delta_temp),
+    names_to = "driver",
+    values_to = "distance"
+  ) %>%
+  dplyr::mutate(
+    metric = dplyr::recode(metric,
+                           bray_sim = "Bray–Curtis",
+                           unifrac_sim = "UniFrac"),
+    driver = dplyr::recode(driver,
+                           geographic_km = "Geographic distance",
+                           delta_temp   = "Temperature difference"),
+    group_id = paste(metric, driver, sep = "_")
+  ) %>%
+  dplyr::group_by(group_id) %>%
+  dplyr::mutate(
+    distance_z   = scale(distance)[,1],
+    similarity_z = scale(similarity)[,1]
+  ) %>%
+  dplyr::ungroup()
+ggplot(dd_plot,
+       aes(x = distance_z,
+           y = similarity_z,
+           color = metric,
+           linetype = driver)) +
+  
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1) +
+  
+  labs(
+    x = "Normalized distance (z-score)",
+    y = "Normalized community similarity (z-score)",
+    color = "Similarity metric",
+    linetype = "Driver"
+  ) +
+  
+  scale_linetype_manual(
+    values = c(
+      "Geographic distance" = "solid",
+      "Temperature difference" = "dashed"
+    )
+  ) +
+  
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    legend.box = "vertical",
+    panel.grid.minor = element_blank()
+  )
+```
+
+
+
+statistics
+```{r}
+
+bray_output <- capture.output(
+  pander(summary(lm(bray ~ geographic_km, data = dd_df)))
+)
+writeLines(bray_output, paste0(path, "DISTDECAY_statistics_bray_geographic_km.txt"))
+
+unifrac_output <- capture.output(
+  pander(summary(lm(unifrac ~ geographic_km, data = dd_df)))
+)
+writeLines(unifrac_output, paste0(path, "DISTDECAY_statistics_unifrac_geographic_km.txt"))
+
+```
+
+
+
+```{r}
+# Mantel test semplici
+mantel(bray_dist, geo_dist, permutations = 9999)
+```
+Mantel statistic r: 0.7684 
+     Significance: 1e-04
+
+```{r}
+mantel(unifrac_dist, geo_dist, permutations = 9999)
+
+```
+Mantel statistic r: 0.4726 
+      Significance: 1e-04
+
+```{r}
+# Mantel test parziali (controllando per temperatura)
+mantel.partial(bray_dist, geo_dist, temp_dist, permutations = 9999)
+```
+
+Mantel statistic r: 0.4001 
+      Significance: 0.0058
+
+```{r}
+mantel.partial(unifrac_dist, geo_dist, temp_dist, permutations = 9999)
+
+```
+Mantel statistic r: 0.2341 
+      Significance: 0.0551 
+
+```{r}
+env_data <- sample_data(phyloseq_obj_css)[, c(
+  "thetao", "so", "chl", "o2", "no3", "po4", "si"
+)]
+
+env_dist <- dist(scale(env_data))
+
+# Mantel ambientale
+mantel(bray_dist, env_dist,permutations = 9999)
+mantel(unifrac_dist, env_dist,permutations = 9999)
+```
+```{r}
+ggplot(env_data, aes(x = so, y = thetao)) +
+  geom_point(alpha = 0.6, color = "blue") +
+  labs(x = "Salinità (psu)", 
+       y = "Temperatura potenziale (°C)",
+       title = "Diagramma T-S") +
+  theme_minimal() +
+  # Aggiungi linee di densità dell'acqua (opzionale)
+  geom_density_2d(color = "black", alpha = 0.5)
+```
+
+
+
+```{r}
+env_data_completo <- data.frame(
+  # I tuoi dati ambientali
+  env_data,
+  # Aggiungi le variabili categorical dal sample_data
+  Zona = sample_data(phyloseq_obj_css)$Zona,
+  Nominativo = sample_data(phyloseq_obj_css)$Nominativo.campione.
+)
+
+
+
+ggplot(env_data_completo, aes(x = so, y = thetao)) +
+  geom_point(aes(color = Zona), size = 3) +
+  geom_text_repel(aes(label = Nominativo), 
+                  size = 2.5, 
+                  box.padding = 0.3,
+                  max.overlaps = 10) +
+  geom_density_2d(color = "gray50", alpha = 0.5, linetype = "dotted") +
+  labs(x = "Salinità (psu)", 
+       y = "Temperatura potenziale (°C)",
+       title = "Diagramma T-S con densità e Zona",
+       color = "Zona") +
+  scale_color_brewer(palette = "Set1") +  # o usa scale_color_viridis_d()
+  theme_bw()
+
+
+```
+
+```{r}
+env_data_completo <- data.frame(
+  # Dati ambientali
+  env_data,
+  # Variabili categorical e coordinate
+  Zona = sample_data(phyloseq_obj_css)$Zona,
+  Nominativo = sample_data(phyloseq_obj_css)$Nominativo.campione.,
+  Latitude = sample_data(phyloseq_obj_css)$Latitude.x,  # usando .x
+  Longitude = sample_data(phyloseq_obj_css)$Longitude.x,  # usando .x
+  # Componenti della corrente
+  uo = sample_data(phyloseq_obj_css)$uo,
+  vo = sample_data(phyloseq_obj_css)$vo
+)
+
+# Calcola velocità della corrente
+env_data_completo$curr_speed <- with(env_data_completo, sqrt(uo^2 + vo^2))
+
+# Rimuovi righe con coordinate NA
+env_data_completo <- env_data_completo %>%
+  filter(!is.na(Latitude), !is.na(Longitude))
+```
+
+```{r}
+ggplot(env_data_completo, aes(x = so, y = thetao)) +
+  # Punti base
+  geom_point(aes(color = Zona), size = 3, alpha = 0.6) +
+  # Frecce della corrente (scalate per visualizzazione)
+  geom_segment(aes(xend = so + uo/10,  # fattore di scala per visualizzare
+                   yend = thetao + vo/10,
+                   color = Zona),
+               arrow = arrow(length = unit(0.1, "cm")),
+               alpha = 0.8) +
+  geom_text_repel(aes(label = Nominativo), 
+                  size = 2.5, 
+                  box.padding = 0.3,
+                  max.overlaps = 15) +
+  scale_color_brewer(palette = "Set1", name = "Zona") +
+  labs(x = "Salinità (psu)", 
+       y = "Temperatura potenziale (°C)",
+       title = "Diagramma T-S con vettori di corrente",
+       subtitle = "Le frecce indicano direzione e intensità (scalata)") +
+  theme_bw()
+```
+
+```{r}
+# Velocità risultante delle correnti
+curr_speed <- with(sample_data(phyloseq_obj_css),
+                   sqrt(uo^2 + vo^2))
+
+curr_dist <- dist(curr_speed)
+
+# Test: correnti vs comunità
+mantel(bray_dist, curr_dist,permutations = 9999)
+mantel(unifrac_dist, curr_dist,permutations = 9999)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

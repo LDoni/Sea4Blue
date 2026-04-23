@@ -1,0 +1,247 @@
+---
+title: "sea4blue_analysis"
+author: "Your Name"
+date: "2026-03-04"
+format: 
+  html:
+    code-fold: false
+    code-tools: true
+    toc: true
+    toc-depth: 3
+editor: visual
+---
+
+## Introduction
+
+Analysis of 16S samples from the Sea4Blue transect with Longhurst province maps and sea surface temperature (SST).
+
+## Initial Setup
+
+### Load libraries
+
+```{r setup, message=FALSE, warning=FALSE}
+#| echo: true
+library(phyloseq)
+library(dplyr)
+library(ggplot2)
+library(vegan)
+library(sf)
+library(rnaturalearth)
+library(raster)
+library(ncdf4)
+library(oceanmap)
+library(RColorBrewer)
+library(viridis)
+library(scales)
+```
+
+### Load data
+
+```{r load-phyloseq}
+#| echo: true
+ps <- readRDS("ps.rds")
+
+# Inspect OTU table
+head(t(otu_table(ps)))
+```
+
+## Longhurst Provinces Map
+
+### Extract sample coordinates
+
+```{r extract-coordinates}
+#| echo: true
+coord.df <- ps %>%
+  subset_samples(!(sample.description %in% c("Laposnegative", 
+                                            "Lapospositive"))) %>%
+  sample_data() %>%
+  dplyr::select(sample.description, Latitude, Longitude)
+
+colnames(coord.df) <- c("id", "lat", "lon")
+```
+
+### Convert to spatial object
+
+```{r convert-sf}
+#| echo: true
+points_sf <- st_as_sf(coord.df,
+                      coords = c("lon", "lat"),
+                      crs = 4326)
+```
+
+### Load Longhurst shapefile
+
+```{r load-longhurst}
+#| echo: true
+longhurst <- st_read("longhurst_v4_2010/Longhurst_world_v4_2010.shp", quiet = TRUE)
+longhurst <- st_make_valid(longhurst)
+longhurst <- st_transform(longhurst, 4326)
+```
+
+### Spatial join
+
+```{r spatial-join}
+#| echo: true
+result <- st_join(points_sf,
+                  longhurst["ProvCode"],
+                  join = st_intersects)
+```
+
+### World basemap
+
+```{r world-map}
+#| echo: true
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+used_provinces <- unique(result$ProvCode)
+
+longhurst_subset <- longhurst %>%
+  filter(ProvCode %in% used_provinces)
+```
+
+### Plot Longhurst map
+
+```{r plot-longhurst, fig.width=10, fig.height=6}
+#| echo: true
+ggplot() +
+  geom_sf(data = world, fill = "#D9D9D9",
+          color = "gray70", size = 0.3) +
+  geom_sf(data = longhurst_subset,
+          aes(fill = ProvCode),
+          color = NA, alpha = 0.4) +
+  geom_sf(data = result,
+          color = "black", size = 2) +
+  geom_sf_text(data = result,
+               aes(label = id),
+               size = 3, nudge_y = 1,
+               check_overlap = TRUE) +
+  scale_fill_viridis_d(name = "Longhurst Province") +
+  coord_sf(crs = 4326,
+           xlim = c(-90, 10),
+           ylim = c(25, 45)) +
+  theme_minimal() +
+  labs(title = "Longhurst Provinces and Sample Points",
+       subtitle = "WGS84 Projection (EPSG:4326)",
+       x = "Longitude",
+       y = "Latitude")
+```
+
+## Assign Longhurst Province to Phyloseq Object
+
+```{r assign-longhurst}
+#| echo: true
+sample_data(ps)$longhurst_provinces <-
+  result$ProvCode[
+    match(sample_data(ps)$sample.description,
+          result$id)
+  ]
+```
+
+## Annual SST (MODIS)
+
+Download externally in terminal:
+
+```{bash download-sst, eval=FALSE}
+#| echo: true
+# wget --auth-no-challenge --load-cookies ~/.urs_cookies \
+# --save-cookies ~/.urs_cookies \
+# "https://oceandata.sci.gsfc.nasa.gov/ob/getfile/AQUA_MODIS.20220101_20221231.L3m.YR.SST.sst.4km.nc"
+```
+
+## Process SST Data
+
+```{r process-sst}
+#| echo: true
+crop.vals_Atl <- c(lat = c(-90, 10),
+                   lon = c(25, 45))
+
+SST_Atl <- nc_open("AQUA_MODIS.20220101_20221231.L3m.YR.SST.sst.4km.nc") %>%
+  oceanmap::nc2raster("sst") %>%
+  raster::flip("y") %>%
+  raster::crop(raster::extent(crop.vals_Atl))
+```
+
+### Optional: quick visualization
+
+```{r quick-viz, eval=FALSE}
+#| echo: true
+oceanmap::v(
+  SST_Atl,
+  cbpos = "b",
+  pal = rev(colorRampPalette(
+    brewer.pal(11, "RdBu"))(300)),
+  zlim = c(0, 35),
+  cb.xlab = expression("Annual SST (°C)"),
+  border = "#504f4f"
+)
+```
+
+## Combined SST + Longhurst Map
+
+```{r combined-map, fig.width=12, fig.height=7}
+#| echo: true
+SST_df <- as.data.frame(SST_Atl, xy = TRUE)
+names(SST_df)[3] <- "sst"
+
+points_sf$longhurst_provinces <- result$ProvCode
+
+ggplot() +
+  
+  # SST background
+  geom_raster(data = SST_df,
+              aes(x = x, y = y, fill = sst)) +
+  
+  scale_fill_gradientn(
+    colors = rev(brewer.pal(11, "RdBu")),
+    name = "Annual SST (°C)",
+    limits = c(0, 35),
+    na.value = "transparent"
+  ) +
+  
+  # World map
+  geom_sf(data = world,
+          fill = "#D9D9D9",
+          color = "gray70",
+          size = 0.3) +
+  
+  # Longhurst borders
+  geom_sf(data = longhurst_subset,
+          color = "gray60",
+          fill = NA,
+          size = 0.4) +
+  
+  # Sample points
+  geom_sf(data = points_sf,
+          aes(color = longhurst_provinces),
+          size = 3) +
+  
+  scale_color_viridis_d(
+    name = "Longhurst Province"
+  ) +
+  
+  geom_sf_text(data = points_sf,
+               aes(label = id),
+               size = 3,
+               nudge_y = 1,
+               check_overlap = TRUE) +
+  
+  coord_sf(crs = 4326,
+           xlim = c(-90, 10),
+           ylim = c(25, 45),
+           expand = FALSE) +
+  
+  theme_minimal() +
+  
+  labs(title = "Sea Surface Temperature and Sample Points",
+       subtitle = "MODIS Annual SST + Longhurst Provinces",
+       x = "Longitude",
+       y = "Latitude")
+```
+
+## Session Info
+
+```{r session-info}
+#| echo: true
+sessionInfo()
+```
+
